@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "npx flowise start",
+    "start": "flowise start",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
