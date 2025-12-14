@@ -8,17 +8,33 @@ from reportlab.pdfgen import canvas
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
-from typing import List
+from typing import List, Optional, Dict
+import httpx
+from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
 
 app = FastAPI(title="My Portfolio Backend", version="0.1.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+load_dotenv()
+
+allowed_origins_env = os.getenv("CORS_ALLOW_ORIGINS")
+if allowed_origins_env:
+    allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 class ContactRequest(BaseModel):
@@ -145,6 +161,60 @@ def download_cv():
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=Andrian_Balberos_CV.pdf"})
 
+class Upload(BaseModel):
+    data: str
+    type: str
+    name: Optional[str] = None
+    mime: Optional[str] = None
+
+class FlowisePredictRequest(BaseModel):
+    question: str
+    chatflow_id: Optional[str] = None
+    override_config: Optional[Dict] = None
+    history: Optional[List[Dict]] = None
+    uploads: Optional[List[Upload]] = None
+
+class FlowisePredictResponse(BaseModel):
+    ok: bool
+    data: Dict
+
+def _flowise_settings() -> Dict[str, Optional[str]]:
+    base_url = os.getenv("FLOWISE_BASE_URL")
+    api_key = os.getenv("FLOWISE_API_KEY")
+    default_chatflow_id = os.getenv("FLOWISE_CHATFLOW_ID")
+    return {
+        "base_url": base_url,
+        "api_key": api_key,
+        "default_chatflow_id": default_chatflow_id,
+    }
+
+@app.post("/api/flowise/predict")
+async def flowise_predict(payload: FlowisePredictRequest):
+    settings = _flowise_settings()
+    if not settings["base_url"]:
+        raise HTTPException(status_code=500, detail="FLOWISE_BASE_URL is not configured")
+    chatflow_id = payload.chatflow_id or settings["default_chatflow_id"]
+    if not chatflow_id:
+        raise HTTPException(status_code=400, detail="chatflow_id is required")
+    url = f"{settings['base_url'].rstrip('/')}/api/v1/prediction/{chatflow_id}"
+    headers = {"Content-Type": "application/json"}
+    if settings["api_key"]:
+        headers["Authorization"] = f"Bearer {settings['api_key']}"
+    body: Dict = {"question": payload.question}
+    if payload.override_config is not None:
+        body["overrideConfig"] = payload.override_config
+    if payload.history is not None:
+        body["history"] = payload.history
+    if payload.uploads is not None:
+        body["uploads"] = [u.model_dump() for u in payload.uploads]
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(url, json=body, headers=headers)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    return JSONResponse(content=resp.json())
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
